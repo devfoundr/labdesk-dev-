@@ -3276,39 +3276,30 @@ window.savePrice = async function(){
   try {
     if (editId) {
       // Редактирование — артикул не трогаем
-      await updateDoc(doc(db, 'work_types', editId), {
+      await window.sbAdapter.update('work_types', editId, {
         name: name,
         category: category,
         price: parseFloat(document.getElementById('price-cost').value) || 0,
         days_default: parseInt(document.getElementById('price-days').value) || 1,
         tech_rate: parseFloat(document.getElementById('price-rate').value) || 0,
-        updated_at: serverTimestamp(),
+        updated_at: new Date().toISOString(),
       });
       window.showToast('✅ Услуга обновлена');
     } else {
-      // Артикул через транзакцию: увеличиваем сквозной счётчик категории в документе лаборатории,
-      // чтобы номера никогда не переиспользовались (даже после удаления хвоста).
-      const labRefA = doc(db, 'labs', user.lab_id);
-      let article = '', usedPrefix = '', usedSeq = 0;
-      await runTransaction(db, async (tx) => {
-        const snap = await tx.get(labRefA);
-        const data = snap.exists() ? snap.data() : {};
-        const counters = Object.assign({}, data.article_counters || {});
-        const works = window._allWorks || [];
-        const prefix = window._resolvePrefix(category, works);
-        const maxExisting = window._maxSeqForPrefix(prefix, works);
-        const next = Math.max(counters[prefix] || 0, maxExisting) + 1;
-        counters[prefix] = next;
-        if (snap.exists()) tx.update(labRefA, { article_counters: counters });
-        else tx.set(labRefA, { article_counters: counters }, { merge: true });
-        usedPrefix = prefix; usedSeq = next;
-        article = prefix + String(next).padStart(2, '0');
+      // Автонумерация артикула — атомарно на сервере (RPC next_article),
+      // чтобы номера не переиспользовались даже после удаления/архива.
+      const works = window._allWorks || [];
+      const prefix = window._resolvePrefix(category, works);
+      const maxExisting = window._maxSeqForPrefix(prefix, works);
+      const { data: article, error: rpcErr } = await sb.rpc('next_article', {
+        p_lab_id: user.lab_id, p_prefix: prefix, p_max_existing: maxExisting
       });
-      // обновляем локальный кэш счётчиков (для корректного превью следующего артикула)
+      if (rpcErr) throw rpcErr;
+      // локальный кэш счётчика (для превью следующего артикула)
       if (!window.LabDesk.labData) window.LabDesk.labData = {};
       if (!window.LabDesk.labData.article_counters) window.LabDesk.labData.article_counters = {};
-      window.LabDesk.labData.article_counters[usedPrefix] = usedSeq;
-      await addDoc(collection(db, 'work_types'), {
+      window.LabDesk.labData.article_counters[prefix] = parseInt(String(article).slice(prefix.length)) || 0;
+      await window.sbAdapter.insert('work_types', {
         lab_id: user.lab_id,
         article: article,
         name: name,
@@ -3317,26 +3308,25 @@ window.savePrice = async function(){
         days_default: parseInt(document.getElementById('price-days').value) || 1,
         tech_rate: parseFloat(document.getElementById('price-rate').value) || 0,
         is_active: true,
-        created_at: serverTimestamp(),
       });
       window.showToast('✅ Услуга добавлена · артикул ' + article);
     }
     window._editingPriceId = null;
     document.getElementById('mo-price').classList.remove('op');
-  } catch(e) { window.showToast('Ошибка: '+e.message); }
+  } catch(e) { window.showToast('Ошибка: '+(e.message||e)); }
   btn.disabled = false;
 };
 
 window.archivePriceItem = async function(id){
   var it = (window._priceCache||{})[id] || {};
   if(!confirm('Убрать в архив: «'+(it.name||'позицию')+'»?\nОна скроется из прайса и подборщика работ, но останется в старых заказах и актах.'))return;
-  try { await updateDoc(doc(db,'work_types',id), { is_active:false }); window.showToast('Позиция в архиве'); }
-  catch(e){ window.showToast('Ошибка: '+e.message); }
+  try { await window.sbAdapter.update('work_types', id, { is_active:false }); window.showToast('Позиция в архиве'); }
+  catch(e){ window.showToast('Ошибка: '+(e.message||e)); }
 };
 
 window.restorePriceItem = async function(id){
-  try { await updateDoc(doc(db,'work_types',id), { is_active:true }); window.showToast('Позиция возвращена'); }
-  catch(e){ window.showToast('Ошибка: '+e.message); }
+  try { await window.sbAdapter.update('work_types', id, { is_active:true }); window.showToast('Позиция возвращена'); }
+  catch(e){ window.showToast('Ошибка: '+(e.message||e)); }
 };
 
 window.togglePriceArchived = function(show){
@@ -3398,8 +3388,6 @@ window.renderPriceList = function(){
   }).join('');
 };
 
-// Переименование категории: обновляет поле category у ВСЕХ позиций этой категории
-// и переносит сохранённый шаблон этапов на новое имя. Артикулы не меняются.
 window.renameCategory = async function(oldCat){
   var newName = prompt('Новое название категории:', oldCat);
   if(newName === null) return;
@@ -3411,37 +3399,33 @@ window.renameCategory = async function(oldCat){
   if(exists && !confirm('Категория «'+newName+'» уже существует. Объединить позиции «'+oldCat+'» в неё?')) return;
   if(!confirm('Переименовать «'+oldCat+'» → «'+newName+'»? Затронет позиций: '+items.length)) return;
   try {
-    for(var i=0;i<items.length;i++){
-      await updateDoc(doc(db,'work_types', items[i].id), { category: newName });
-    }
-    // переносим сохранённый шаблон этапов (если есть)
-    var tq = query(collection(db,'stage_templates'), where('lab_id','==',user.lab_id), where('category','==',oldCat));
-    var tsnap = await getDocs(tq);
-    for(var j=0;j<tsnap.docs.length;j++){
-      await updateDoc(doc(db,'stage_templates', tsnap.docs[j].id), { category: newName });
-    }
+    // массовое переименование позиций прайса (одним запросом)
+    const { error: e1 } = await sb.from('work_types')
+      .update({ category: newName }).eq('lab_id', user.lab_id).eq('category', oldCat);
+    if (e1) throw e1;
+    // перенос сохранённого шаблона этапов на новое имя
+    const { error: e2 } = await sb.from('stage_templates')
+      .update({ category: newName }).eq('lab_id', user.lab_id).eq('category', oldCat);
+    if (e2) throw e2;
     window.showToast('✅ Категория переименована · позиций: '+items.length);
-  } catch(e){ window.showToast('Ошибка: '+e.message); }
+  } catch(e){ window.showToast('Ошибка: '+(e.message||e)); }
 };
 
 window.updatePriceField = async function(id, field, value){
   try {
     const num = parseFloat(String(value).replace(/\s/g,'')) || 0;
-    await updateDoc(doc(db,'work_types',id), { [field]: num });
+    await window.sbAdapter.update('work_types', id, { [field]: num });
     window.showToast('Сохранено');
-  } catch(e) { window.showToast('Ошибка: '+e.message); }
+  } catch(e) { window.showToast('Ошибка: '+(e.message||e)); }
 };
 
 window.subscribePriceList = function(labId){
-  const q = query(collection(db,'work_types'), where('lab_id','==',labId));
-  onSnapshot(q, s => {
-    const all = s.docs.map(d=>({id:d.id,...d.data()}));
+  window.sbAdapter.subscribe('work_types', 'lab_id', labId, rows => {
+    const all = rows;
     const active = all.filter(it=>it.is_active!==false);
     window._priceAll = all;              // все позиции (в т.ч. архивные) — для рендера прайса
     window.renderPriceList();            // рендер с учётом переключателя «показать архивные»
-    // Полный прайс для индивидуальных цен клиник — только активные
     window._allWorksFull = active.slice();
-    // Список работ для формы создания заказа — только активные (архивные не предлагаем)
     if (typeof _allWorks !== 'undefined') {
       _allWorks.length = 0;
       active.forEach(it => _allWorks.push({
@@ -3450,7 +3434,7 @@ window.subscribePriceList = function(labId){
         tech_rate: it.tech_rate||0, days: it.days_default||1,
       }));
     }
-  }, err => console.error('Price error:', err));
+  });
 };
 
 // Стартовый прайс — загружается один раз
@@ -3486,15 +3470,14 @@ window.seedPriceList = async function(){
     ['0503','Каппы','Каппа для отбеливания',1000,3,300],
   ];
   try {
-    for (const [article,category,name,price,days,rate] of seed) {
-      await addDoc(collection(db,'work_types'), {
-        lab_id: user.lab_id, article, category, name,
-        price, days_default: days, tech_rate: rate,
-        is_active: true, created_at: serverTimestamp(),
-      });
-    }
+    const rows = seed.map(([article,category,name,price,days,rate]) => ({
+      lab_id: user.lab_id, article, category, name,
+      price, days_default: days, tech_rate: rate, is_active: true,
+    }));
+    const { error } = await sb.from('work_types').insert(rows);
+    if (error) throw error;
     window.showToast('✅ Стартовый прайс загружен');
-  } catch(e) { window.showToast('Ошибка: '+e.message); }
+  } catch(e) { window.showToast('Ошибка: '+(e.message||e)); }
   btn.disabled = false;
 };
 
@@ -5223,8 +5206,8 @@ window.goToOrdersFiltered = function(filter){
     if (nameEl) nameEl.textContent = prof.full_name || user.email;
     if (emailEl) emailEl.textContent = user.email;
 
-    // ⏳ Подписки на данные подключим по мере перевода доменов на Supabase.
-    // Пока экраны с данными (прайс, клиники, заказы) пустые — это ожидаемо.
+    // ⏳ Подписки на данные подключаем по мере перевода доменов на Supabase.
+    if (window.subscribePriceList) window.subscribePriceList(prof.lab_id);   // Прайс — переведён
 
   } catch(e) { console.error('Boot error:', e); }
 })();
