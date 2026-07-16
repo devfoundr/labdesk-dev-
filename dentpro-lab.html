@@ -5095,7 +5095,7 @@ window.applyOrdersFilter = function(filter){
     const dl = window.getDeadlineStatus(o.due_date, o.due_time, o.status);
     return `<tr style="cursor:pointer" onclick="openOrderDetail('${o.id}')">
       <td class="tdm">${o.order_number||'—'}</td>
-      <td>${o.clinic_name||'—'}</td>
+      <td>${o.clinic_name||'—'}${o.doctor_name?'<div style="font-size:11px;color:var(--t3);margin-top:2px">'+o.doctor_name+'</div>':''}</td>
       <td>${o.patient_name||'—'}</td>
       <td>${o.work_type||'—'}${o.quantity>1?' ×'+o.quantity:''}</td>
       <td>—</td>
