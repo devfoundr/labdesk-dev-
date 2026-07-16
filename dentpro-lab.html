@@ -3494,23 +3494,23 @@ window.saveClinic = async function(){
   const btn = document.getElementById('btn-save-clinic');
   btn.disabled=true;
   try{
-    await addDoc(collection(db,'clinics'),{
+    await window.sbAdapter.insert('clinics',{
       lab_id:user.lab_id, name,
       contact_person:document.getElementById('clinic-contact').value.trim(),
       phone:document.getElementById('clinic-phone').value.trim(),
       email:document.getElementById('clinic-email').value.trim(),
       inn:document.getElementById('clinic-inn').value.trim(),
-      is_active:true, created_at:serverTimestamp(),
+      is_active:true,
     });
     document.getElementById('mo-clinic').classList.remove('op');
     window.showToast('✅ Клиника добавлена');
-  }catch(e){window.showToast('Ошибка: '+e.message);}
+  }catch(e){window.showToast('Ошибка: '+(e.message||e));}
   btn.disabled=false;
 };
 window.deleteClinic = async function(id){
   if(!confirm('Удалить клинику? Заказы клиники останутся.'))return;
-  try{await updateDoc(doc(db,'clinics',id),{is_active:false});window.showToast('Клиника скрыта');}
-  catch(e){window.showToast('Ошибка: '+e.message);}
+  try{await window.sbAdapter.update('clinics',id,{is_active:false});window.showToast('Клиника скрыта');}
+  catch(e){window.showToast('Ошибка: '+(e.message||e));}
 };
 window.renderClinics = function(clinics){
   const tbody = document.getElementById('clinics-tbody');
@@ -3532,12 +3532,10 @@ window.renderClinics = function(clinics){
   ).join('');
 };
 window.subscribeClinics = function(labId){
-  const q = query(collection(db,'clinics'), where('lab_id','==',labId));
-  onSnapshot(q, s=>{
-    const clinics = s.docs.map(d=>({id:d.id,...d.data()})).filter(c=>c.is_active!==false);
-    clinics.sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+  window.sbAdapter.subscribe('clinics','lab_id',labId, rows=>{
+    const clinics = rows.filter(c=>c.is_active!==false).sort((a,b)=>(a.name||'').localeCompare(b.name||''));
     window.renderClinics(clinics);
-  }, err=>console.error('Clinics error:',err));
+  });
 };
 
 // ── Индивидуальные цены клиник ──
@@ -3559,19 +3557,17 @@ window.openClinicPrices = async function(clinicId, clinicName){
     // Если кэша нет — загрузим
     if(!window._cpAllWorks.length){
       const user = window.LabDesk.currentUser;
-      const wq = query(collection(db,'work_types'), where('lab_id','==',user.lab_id));
-      const ws = await getDocs(wq);
-      window._cpAllWorks = ws.docs.map(d=>({id:d.id,...d.data()})).filter(w=>w.is_active!==false);
+      window._cpAllWorks = (await window.sbAdapter.list('work_types',{eq:{lab_id:user.lab_id}}))
+                             .filter(w=>w.is_active!==false);
     }
     // Загружаем индивидуальные цены клиники
     window._cpPrices = {};
-    const cq = query(collection(db,'clinic_prices'), where('clinic_id','==',clinicId));
-    const cs = await getDocs(cq);
-    cs.docs.forEach(d=>{ const data=d.data(); window._cpPrices[data.work_type_id] = data.price; });
+    const rows = await window.sbAdapter.list('clinic_prices',{eq:{clinic_id:clinicId}});
+    rows.forEach(r=>{ window._cpPrices[r.work_type_id] = r.price; });
     renderClinicPriceRows('');
   } catch(e){
     console.error('Clinic prices load error:', e);
-    tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--re);padding:20px">Ошибка загрузки: '+e.message+'</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="3" style="text-align:center;color:var(--re);padding:20px">Ошибка загрузки: '+(e.message||e)+'</td></tr>';
   }
 };
 
@@ -3615,32 +3611,32 @@ window.saveClinicPrices = async function(){
   btn.disabled = true; btn.textContent = 'Сохраняем...';
   try {
     const inputs = [...document.querySelectorAll('#cp-tbody input[data-wt]')];
+    const toUpsert = [];
+    const toDelete = [];
     for(const inp of inputs){
       const wtId = inp.dataset.wt;
       const val = inp.value.trim();
-      const docId = clinicId + '_' + wtId;
-      const ref = doc(db,'clinic_prices',docId);
       if(val===''){
-        // Если был индивидуальный — удаляем
-        if(window._cpPrices[wtId]!==undefined){
-          try{ await deleteDoc(ref); }catch(e){}
-          delete window._cpPrices[wtId];
-        }
+        if(window._cpPrices[wtId]!==undefined){ toDelete.push(wtId); delete window._cpPrices[wtId]; }
       } else {
         const price = parseFloat(val)||0;
-        await setDoc(ref,{
-          clinic_id: clinicId, lab_id: user.lab_id,
-          work_type_id: wtId, price: price,
-          updated_at: serverTimestamp(),
-        });
+        toUpsert.push({ clinic_id: clinicId, lab_id: user.lab_id, work_type_id: wtId, price });
         window._cpPrices[wtId] = price;
       }
+    }
+    if(toUpsert.length){
+      const { error } = await sb.from('clinic_prices').upsert(toUpsert, { onConflict: 'clinic_id,work_type_id' });
+      if(error) throw error;
+    }
+    if(toDelete.length){
+      const { error } = await sb.from('clinic_prices').delete().eq('clinic_id',clinicId).in('work_type_id',toDelete);
+      if(error) throw error;
     }
     window.showToast('✅ Индивидуальные цены сохранены');
     document.getElementById('mo-clinic-prices').classList.remove('op');
   } catch(e){
     console.error('Save clinic prices error:', e);
-    window.showToast('Ошибка: '+e.message);
+    window.showToast('Ошибка: '+(e.message||e));
   }
   btn.disabled = false; btn.textContent = 'Сохранить цены';
 };
@@ -3654,13 +3650,12 @@ window.openClinicRequisites = async function(clinicId, clinicName){
   ['cr-name','cr-inn','cr-kpp','cr-ogrn','cr-phone','cr-address','cr-account','cr-bank','cr-bik','cr-corr'].forEach(function(id){var el=document.getElementById(id);if(el)el.value='';});
   document.getElementById('mo-clinic-req').classList.add('op');
   try {
-    var snap = await getDoc(doc(db,'clinics',clinicId));
-    if(snap.exists()){
-      var c = snap.data();
+    const { data: c } = await sb.from('clinics').select('*').eq('id',clinicId).single();
+    if(c){
       var r = c.requisites || {};
       var set=function(id,v){var el=document.getElementById(id);if(el&&v)el.value=v;};
       set('cr-name', r.name || c.name);
-      set('cr-inn', r.inn); set('cr-kpp', r.kpp); set('cr-ogrn', r.ogrn);
+      set('cr-inn', r.inn || c.inn); set('cr-kpp', r.kpp); set('cr-ogrn', r.ogrn);
       set('cr-phone', r.phone || c.phone); set('cr-address', r.address);
       set('cr-account', r.account); set('cr-bank', r.bank);
       set('cr-bik', r.bik); set('cr-corr', r.corr);
@@ -3680,12 +3675,12 @@ window.saveClinicRequisites = async function(){
   var btn = document.getElementById('btn-save-cr');
   btn.disabled = true;
   try {
-    await updateDoc(doc(db,'clinics',clinicId), { requisites: req });
+    await window.sbAdapter.update('clinics', clinicId, { requisites: req });
     window.showToast('✅ Реквизиты клиники сохранены');
     document.getElementById('mo-clinic-req').classList.remove('op');
   } catch(e){
     console.error('Save clinic req error:', e);
-    window.showToast('Ошибка: '+e.message);
+    window.showToast('Ошибка: '+(e.message||e));
   }
   btn.disabled = false;
 };
@@ -3710,10 +3705,9 @@ window.loadClinicDoctors = async function(){
   const box = document.getElementById('cd-list');
   box.innerHTML = '<div style="text-align:center;color:var(--t3);padding:16px">Загрузка...</div>';
   try {
-    const q = query(collection(db,'doctors'), where('clinic_id','==',clinicId));
-    const snap = await getDocs(q);
-    const docs = snap.docs.map(d=>({id:d.id,...d.data()})).filter(x=>x.is_active!==false);
-    docs.sort((a,b)=>(a.full_name||'').localeCompare(b.full_name||''));
+    const docs = (await window.sbAdapter.list('doctors',{eq:{clinic_id:clinicId}}))
+                   .filter(x=>x.is_active!==false)
+                   .sort((a,b)=>(a.full_name||'').localeCompare(b.full_name||''));
     if(!docs.length){
       box.innerHTML='<div style="text-align:center;color:var(--t3);padding:16px;font-size:13px">Врачей пока нет. Добавьте первого ниже.</div>';
       return;
@@ -3755,6 +3749,7 @@ window.cancelEditDoctor = function(){
 
 window.addClinicDoctor = async function(){
   const clinicId = window._cdClinicId;
+  const user = window.LabDesk.currentUser;
   const name = document.getElementById('cd-name').value.trim();
   if(!name){ window.showToast('Введите ФИО врача'); return; }
   const btn = document.getElementById('btn-add-doctor');
@@ -3763,31 +3758,29 @@ window.addClinicDoctor = async function(){
     const phone = document.getElementById('cd-phone').value.trim();
     const email = document.getElementById('cd-email').value.trim();
     if(window._cdEditId){
-      // Редактирование существующего
-      await updateDoc(doc(db,'doctors',window._cdEditId),{ full_name:name, phone:phone, email:email });
+      await window.sbAdapter.update('doctors', window._cdEditId, { full_name:name, phone:phone, email:email });
       window.showToast('✅ Врач обновлён');
       window.cancelEditDoctor();
     } else {
-      // Новый врач
-      await addDoc(collection(db,'doctors'),{
-        clinic_id: clinicId, full_name: name, phone: phone, email: email,
-        is_active: true, created_at: serverTimestamp(),
+      await window.sbAdapter.insert('doctors',{
+        clinic_id: clinicId, lab_id: user.lab_id,
+        full_name: name, phone: phone, email: email, is_active: true,
       });
       ['cd-name','cd-phone','cd-email'].forEach(id=>{document.getElementById(id).value='';});
       window.showToast('✅ Врач добавлен');
     }
     await loadClinicDoctors();
-  } catch(e){ window.showToast('Ошибка: '+e.message); }
+  } catch(e){ window.showToast('Ошибка: '+(e.message||e)); }
   btn.disabled = false;
 };
 
 window.deleteClinicDoctor = async function(docId){
   if(!confirm('Удалить врача из клиники?'))return;
   try {
-    await updateDoc(doc(db,'doctors',docId),{is_active:false});
+    await window.sbAdapter.update('doctors', docId, { is_active:false });
     window.showToast('Врач удалён');
     await loadClinicDoctors();
-  } catch(e){ window.showToast('Ошибка: '+e.message); }
+  } catch(e){ window.showToast('Ошибка: '+(e.message||e)); }
 };
 
 // ── Банк этапов ──
@@ -4063,15 +4056,13 @@ window.onClinicChange = async function(){
     return;
   }
   sel.innerHTML = '<option value="">Загрузка врачей...</option>';
-  const { collection, query, where, getDocs } = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js');
   // 1) Врачи — отдельно, чтобы ошибка цен их не стирала
   try {
-    const q = query(collection(db,'doctors'), where('clinic_id','==',clinicId));
-    const snap = await getDocs(q);
-    const docs = snap.docs.map(d=>({id:d.id,...d.data()})).filter(x=>x.is_active!==false);
+    const docs = (await window.sbAdapter.list('doctors',{eq:{clinic_id:clinicId}}))
+                   .filter(x=>x.is_active!==false);
     window._doctorsCache[clinicId] = docs;
     let html = '<option value="">— выберите врача —</option>';
-    docs.forEach(doc => { html += '<option value="'+doc.id+'">'+(doc.full_name||'без имени')+'</option>'; });
+    docs.forEach(d => { html += '<option value="'+d.id+'">'+(d.full_name||'без имени')+'</option>'; });
     html += '<option value="__new__">+ Новый врач</option>';
     sel.innerHTML = html;
   } catch(e){
@@ -4080,10 +4071,9 @@ window.onClinicChange = async function(){
   }
   // 2) Индивидуальные цены клиники — отдельно
   try {
-    const pq = query(collection(db,'clinic_prices'), where('clinic_id','==',clinicId));
-    const ps = await getDocs(pq);
+    const rows = await window.sbAdapter.list('clinic_prices',{eq:{clinic_id:clinicId}});
     window._orderClinicPrices = {};
-    ps.docs.forEach(d=>{ const data=d.data(); window._orderClinicPrices[data.work_type_id] = data.price; });
+    rows.forEach(r=>{ window._orderClinicPrices[r.work_type_id] = r.price; });
     if(window._pickedWorks && _pickedWorks.length) applyClinicPricesToPicked();
   } catch(e){
     console.error('Clinic prices load error:', e);
@@ -5208,6 +5198,7 @@ window.goToOrdersFiltered = function(filter){
 
     // ⏳ Подписки на данные подключаем по мере перевода доменов на Supabase.
     if (window.subscribePriceList) window.subscribePriceList(prof.lab_id);   // Прайс — переведён
+    if (window.subscribeClinics)   window.subscribeClinics(prof.lab_id);     // Клиники — переведён
 
   } catch(e) { console.error('Boot error:', e); }
 })();
