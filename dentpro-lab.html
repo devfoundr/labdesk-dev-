@@ -4036,7 +4036,8 @@ window.subscribeOrders = function(labId){
       .order('created_at', { ascending: false });
     if (error) { console.error('orders load', error); return; }
     const orders = (data||[]).map(o => ({ ...o, clinic_name: (o.clinics && o.clinics.name) || '—' }));
-    window._ordersCache = orders;
+    window._ordersCache = {};
+    orders.forEach(o => { window._ordersCache[o.id] = o; });
     if (window.renderOrders)   window.renderOrders(orders);
     if (window.renderDashboard) window.renderDashboard(orders);
   };
@@ -4494,10 +4495,10 @@ window.printInvoiceData = function(a){
 
 window.saveOrderTeeth = async function(orderId, teeth){
   try {
-    await updateDoc(doc(db,'orders',orderId),{ teeth: teeth });
+    await window.sbAdapter.update('orders', orderId, { teeth: teeth });
     if(window._ordersCache[orderId]) window._ordersCache[orderId].teeth = teeth;
     window.showToast('✅ Формула сохранена');
-  } catch(e){ window.showToast('Ошибка: '+e.message); }
+  } catch(e){ window.showToast('Ошибка: '+(e.message||e)); }
 };
 
 window._priceCache = {};
@@ -4510,75 +4511,62 @@ window.sendChatMessage = async function(text) {
   if (!orderId) { window.showToast('Откройте заказ'); return; }
   const user = window.LabDesk.currentUser;
   try {
-    await addDoc(collection(db, 'chat_messages'), {
+    await window.sbAdapter.insert('chat_messages', {
       order_id: orderId,
       sender_id: user.uid,
       sender_role: 'lab',
+      author_name: user.full_name || user.email || '',
       text: text,
       is_alert: false,
       is_read: false,
-      created_at: serverTimestamp(),
     });
   } catch(e) {
     console.error('Send chat error:', e);
-    window.showToast('Ошибка отправки: ' + e.message);
+    window.showToast('Ошибка отправки: ' + (e.message||e));
   }
 };
 
 // ── История изменений заказа ──
 window._historyUnsub = null;
-window.subscribeOrderHistory = async function(orderId){
-  if (window._historyUnsub) { window._historyUnsub(); window._historyUnsub = null; }
-  const { collection, query, where, onSnapshot } = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js');
+window.subscribeOrderHistory = function(orderId){
+  if (window._historyUnsub) { try{window._historyUnsub();}catch(_){} window._historyUnsub = null; }
   const box = document.getElementById('od-history-list');
   if(!box) return;
-  const q = query(collection(db,'order_history'), where('order_id','==',orderId));
-  window._historyUnsub = onSnapshot(q, function(snap){
-    // serverTimestamps:'estimate' — пока сервер не подтвердил serverTimestamp(),
-    // подставляем локальную оценку времени вместо null. Без этого только что
-    // добавленное событие приходит с created_at=null, сортируется как 0 и улетает
-    // в самый низ, а наверх прыгает лишь после подтверждения сервером (или вовсе
-    // залипает внизу до следующей записи).
-    let items = snap.docs.map(d=>({id:d.id, ...d.data({ serverTimestamps: 'estimate' })}));
-    // Свежие сверху. Если времени всё же нет — считаем запись новейшей,
-    // чтобы оптимистичная запись не проваливалась вниз.
-    items.sort(function(a,b){
-      var ta = a.created_at && a.created_at.toDate ? a.created_at.toDate().getTime() : Infinity;
-      var tb = b.created_at && b.created_at.toDate ? b.created_at.toDate().getTime() : Infinity;
+  var STATUS_LABELS = { new:'Новый', in_progress:'В работе', done:'Готово', returned:'Переделка', waiting:'На проверке' };
+  var STAGE_STATUS_COLOR = { done:'var(--gr)', active:'var(--bl)', problem:'var(--re)', check:'var(--am)', wait:'var(--am)', idle:'var(--t3)' };
+  var STAGE_LABEL_COLOR  = { 'Выполнен':'var(--gr)', 'В работе':'var(--bl)', 'Возврат':'var(--re)', 'На проверке':'var(--am)', 'Ожид. инфо':'var(--am)', 'Не начат':'var(--t3)' };
+  function eventColor(h){
+    if(h.event_type === 'order_created') return 'var(--te)';
+    if(h.event_type === 'order_updated') return 'var(--am)';
+    if(h.event_type === 'status_changed'){
+      if(h.status === 'returned') return 'var(--re)';
+      if(h.status === 'done')     return 'var(--gr)';
+      return 'var(--pu)';
+    }
+    if(h.event_type === 'stage_updated'){
+      if(h.status && STAGE_STATUS_COLOR[h.status]) return STAGE_STATUS_COLOR[h.status];
+      var d = h.description || '';
+      for(var lbl in STAGE_LABEL_COLOR){ if(d.indexOf('— '+lbl) >= 0) return STAGE_LABEL_COLOR[lbl]; }
+      return 'var(--gr)';
+    }
+    return 'var(--te)';
+  }
+  const render = (rows) => {
+    let items = rows.slice().sort(function(a,b){
+      var ta = a.created_at ? new Date(a.created_at).getTime() : Infinity;
+      var tb = b.created_at ? new Date(b.created_at).getTime() : Infinity;
       return tb - ta;
     });
     if(!items.length){
       box.innerHTML = '<div style="color:var(--t3);font-size:12px;text-align:center;padding:14px">История пуста</div>';
       return;
     }
-    var STATUS_LABELS = { new:'Новый', in_progress:'В работе', done:'Готово', returned:'Переделка', waiting:'На проверке' };
-    // Цвет точки по статусу этапа (поле status в записи) либо по тексту описания (старые записи).
-    var STAGE_STATUS_COLOR = { done:'var(--gr)', active:'var(--bl)', problem:'var(--re)', check:'var(--am)', wait:'var(--am)', idle:'var(--t3)' };
-    var STAGE_LABEL_COLOR  = { 'Выполнен':'var(--gr)', 'В работе':'var(--bl)', 'Возврат':'var(--re)', 'На проверке':'var(--am)', 'Ожид. инфо':'var(--am)', 'Не начат':'var(--t3)' };
-    function eventColor(h){
-      if(h.event_type === 'order_created') return 'var(--te)';
-      if(h.event_type === 'order_updated') return 'var(--am)';
-      if(h.event_type === 'status_changed'){
-        if(h.status === 'returned') return 'var(--re)';
-        if(h.status === 'done')     return 'var(--gr)';
-        return 'var(--pu)';
-      }
-      if(h.event_type === 'stage_updated'){
-        if(h.status && STAGE_STATUS_COLOR[h.status]) return STAGE_STATUS_COLOR[h.status];
-        // запасной разбор по тексту для старых записей без поля status
-        var d = h.description || '';
-        for(var lbl in STAGE_LABEL_COLOR){ if(d.indexOf('— '+lbl) >= 0) return STAGE_LABEL_COLOR[lbl]; }
-        return 'var(--gr)';
-      }
-      return 'var(--te)';
-    }
     box.innerHTML = items.map(function(h, idx){
       var color = eventColor(h);
-      var time = h.created_at && h.created_at.toDate
-        ? h.created_at.toDate().toLocaleString('ru-RU',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})
+      var time = h.created_at
+        ? new Date(h.created_at).toLocaleString('ru-RU',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})
         : '';
       var title = h.description || '';
-      // Делаем человекочитаемее
       Object.keys(STATUS_LABELS).forEach(function(k){
         title = title.replace('Статус изменён на: '+k, 'Статус: ' + STATUS_LABELS[k]);
       });
@@ -4589,16 +4577,21 @@ window.subscribeOrderHistory = async function(orderId){
         +'<div class="tlb"><div class="tltit">'+title+(time?'<span class="tltime">'+time+'</span>':'')+'</div>'
         +(desc?'<div class="tldesc">'+desc+'</div>':'')+tag+'</div></div>';
     }).join('');
-  }, function(err){
-    console.error('History load error:', err);
-    box.innerHTML = '<div style="color:var(--t3);font-size:12px;text-align:center;padding:14px">Не удалось загрузить историю</div>';
-  });
+  };
+  const load = async () => {
+    try { render(await window.sbAdapter.list('order_history', { eq:{order_id:orderId} })); }
+    catch(e){ box.innerHTML = '<div style="color:var(--t3);font-size:12px;text-align:center;padding:14px">Не удалось загрузить историю</div>'; }
+  };
+  load();
+  const ch = sb.channel('rt-hist-'+Math.random().toString(36).slice(2))
+    .on('postgres_changes', { event:'*', schema:'public', table:'order_history' }, load)
+    .subscribe();
+  window._historyUnsub = () => { try{ sb.removeChannel(ch); }catch(_){} };
 };
 
 
-window.subscribeChatMessages = async function(orderId) {
-  if (window._chatUnsub) { window._chatUnsub(); window._chatUnsub = null; }
-  const { collection, query, where, orderBy, onSnapshot } = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js');
+window.subscribeChatMessages = function(orderId) {
+  if (window._chatUnsub) { try{window._chatUnsub();}catch(_){} window._chatUnsub = null; }
 
   const renderChat = (msgs) => {
     const box = document.getElementById('chat-msgs');
@@ -4609,8 +4602,8 @@ window.subscribeChatMessages = async function(orderId) {
     }
     box.innerHTML = msgs.map(m => {
       const isOut = m.sender_role === 'lab';
-      const time = m.created_at && m.created_at.toDate
-        ? m.created_at.toDate().toLocaleString('ru-RU',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})
+      const time = m.created_at
+        ? new Date(m.created_at).toLocaleString('ru-RU',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})
         : 'сейчас';
       const who = m.sender_role === 'lab' ? 'Лаборатория' : (m.sender_role === 'clinic' ? 'Клиника' : 'Техник');
       const alertCls = m.is_alert ? ' al' : '';
@@ -4621,70 +4614,43 @@ window.subscribeChatMessages = async function(orderId) {
     box.scrollTop = box.scrollHeight;
   };
 
-  const tryQuery = (withSort) => {
-    const q = withSort
-      ? query(collection(db,'chat_messages'), where('order_id','==',orderId), orderBy('created_at','asc'))
-      : query(collection(db,'chat_messages'), where('order_id','==',orderId));
-    window._chatUnsub = onSnapshot(q,
-      s => {
-        let msgs = s.docs.map(d => ({id:d.id, ...d.data()}));
-        msgs.sort((a,b) => {
-          const ta = a.created_at && a.created_at.toDate ? a.created_at.toDate().getTime() : Date.now();
-          const tb = b.created_at && b.created_at.toDate ? b.created_at.toDate().getTime() : Date.now();
-          return ta - tb;
-        });
-        renderChat(msgs);
-      },
-      err => { if (withSort && err.code==='failed-precondition') tryQuery(false); else console.error('Chat error:', err); }
-    );
+  const load = async () => {
+    const rows = await window.sbAdapter.list('chat_messages', { eq:{order_id:orderId}, order:'created_at', ascending:true });
+    renderChat(rows);
   };
-  tryQuery(true);
+  load();
+  const ch = sb.channel('rt-chat-'+Math.random().toString(36).slice(2))
+    .on('postgres_changes', { event:'*', schema:'public', table:'chat_messages' }, load)
+    .subscribe();
+  window._chatUnsub = () => { try{ sb.removeChannel(ch); }catch(_){} };
 };
 
-// ── Загрузка этапов из Firestore ──
+// ── Загрузка этапов (Supabase) ──
 window.loadStagesFromFirestore = async function(orderId) {
   if (!orderId) return;
-  const { collection, query, where, orderBy, getDocs } = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js');
-
-  const mapStages = (snap) => {
-    if (!snap.empty) {
-      window._ordStages = snap.docs.map(d => ({
-        id: d.id,
-        name: d.data().name || '',
-        days: d.data().days_planned || 1,
-        tech: d.data().technician_name || '',
-        status: d.data().status || 'idle',
-        comment: d.data().comment || '',
-        deadline: d.data().due_date || '',
-        sort_order: d.data().sort_order || 0,
-        work_art: d.data().work_art || '',
-        work_name: d.data().work_name || '',
-      }));
-      window._ordStages.sort((a,b) => (a.sort_order||0) - (b.sort_order||0));
-    } else {
-      window._ordStages = [];
-    }
-    if (typeof renderOrdStages === 'function') renderOrdStages();
-  };
-
   try {
-    // Пробуем с сортировкой
-    const q = query(collection(db, 'stages'), where('order_id', '==', orderId), orderBy('sort_order', 'asc'));
-    const snap = await getDocs(q);
-    mapStages(snap);
+    const rows = await window.sbAdapter.list('stages', { eq:{order_id:orderId}, order:'sort_order', ascending:true });
+    window._ordStages = rows.map(d => ({
+      id: d.id,
+      name: d.name || '',
+      days: d.days_planned || 1,
+      tech: d.technician_name || '',
+      status: d.status || 'idle',
+      comment: d.comment || '',
+      deadline: d.due_date || '',
+      sort_order: d.sort_order || 0,
+      work_art: d.work_art || '',
+      work_name: d.work_name || '',
+    }));
+    if (typeof renderOrdStages === 'function') renderOrdStages();
   } catch(e) {
-    // Если нужен индекс — грузим без сортировки
-    try {
-      const q2 = query(collection(db, 'stages'), where('order_id', '==', orderId));
-      const snap2 = await getDocs(q2);
-      mapStages(snap2);
-    } catch(e2) {
-      console.error('Load stages error:', e2);
-    }
+    console.error('Load stages error:', e);
+    window._ordStages = [];
+    if (typeof renderOrdStages === 'function') renderOrdStages();
   }
 };
 
-// ── Сохранение одного этапа в Firestore ──
+// ── Сохранение одного этапа (Supabase) ──
 window.saveStageToFirestore = async function(idx) {
   const orderId = window._currentOrderId;
   if (!orderId) return;
@@ -4692,41 +4658,28 @@ window.saveStageToFirestore = async function(idx) {
   if (!s) return;
   const user = window.LabDesk.currentUser;
   try {
+    const payload = {
+      name: s.name,
+      days_planned: s.days || 1,
+      technician_name: s.tech || '',
+      status: s.status || 'idle',
+      comment: s.comment || '',
+      due_date: s.deadline || null,
+      sort_order: idx,
+      work_art: s.work_art || '',
+      work_name: s.work_name || '',
+    };
     if (s.id) {
-      // Обновляем существующий
-      await updateDoc(doc(db, 'stages', s.id), {
-        name: s.name,
-        days_planned: s.days || 1,
-        technician_name: s.tech || '',
-        status: s.status || 'idle',
-        comment: s.comment || '',
-        due_date: s.deadline || null,
-        sort_order: idx,
-        work_art: s.work_art || '',
-        work_name: s.work_name || '',
-      });
+      await window.sbAdapter.update('stages', s.id, payload);
     } else {
-      // Создаём новый
-      const ref = await addDoc(collection(db, 'stages'), {
-        order_id: orderId,
-        lab_id: user.lab_id,
-        name: s.name,
-        days_planned: s.days || 1,
-        technician_name: s.tech || '',
-        status: s.status || 'idle',
-        comment: s.comment || '',
-        due_date: s.deadline || null,
-        sort_order: idx,
-        work_art: s.work_art || '',
-        work_name: s.work_name || '',
-        created_at: serverTimestamp(),
-      });
-      window._ordStages[idx].id = ref.id;
+      payload.order_id = orderId;
+      payload.lab_id = user.lab_id;
+      const created = await window.sbAdapter.insert('stages', payload);
+      window._ordStages[idx].id = created.id;
     }
-    // История пишется только при явной смене статуса (см. pickOrdStatus)
   } catch(e) {
     console.error('Save stage error:', e);
-    window.showToast('Ошибка сохранения этапа: ' + e.message);
+    window.showToast('Ошибка сохранения этапа: ' + (e.message||e));
   }
 };
 
@@ -4739,25 +4692,24 @@ window.writeStageHistory = async function(idx, newStatus){
   const user = window.LabDesk.currentUser;
   var statusLabel = (typeof _statusMap !== 'undefined' && _statusMap[newStatus]) || newStatus;
   try {
-    await addDoc(collection(db, 'order_history'), {
+    await window.sbAdapter.insert('order_history', {
       order_id: orderId,
       user_id: user.uid,
       user_name: user.full_name || user.email || '',
       event_type: 'stage_updated',
       status: newStatus,
       description: 'Этап «' + s.name + '» — ' + statusLabel,
-      created_at: serverTimestamp(),
     });
   } catch(e){ console.warn('History write skipped:', e); }
 };
 
-// ── Удаление этапа из Firestore ──
+// ── Удаление этапа (Supabase) ──
 window.deleteStageFromFirestore = async function(stageId) {
   try {
-    await deleteDoc(doc(db, 'stages', stageId));
+    await window.sbAdapter.remove('stages', stageId);
   } catch(e) {
     console.error('Delete stage error:', e);
-    window.showToast('Ошибка удаления: ' + e.message);
+    window.showToast('Ошибка удаления: ' + (e.message||e));
   }
 };
 
@@ -4769,7 +4721,7 @@ window.persistStageOrder = async function() {
     for (let idx = 0; idx < window._ordStages.length; idx++) {
       const s = window._ordStages[idx];
       if (s && s.id && s.sort_order !== idx) {
-        await updateDoc(doc(db, 'stages', s.id), { sort_order: idx });
+        await window.sbAdapter.update('stages', s.id, { sort_order: idx });
         s.sort_order = idx;
       }
     }
@@ -4778,13 +4730,13 @@ window.persistStageOrder = async function() {
   }
 };
 
-// ── Добавление нового этапа в Firestore ──
+// ── Добавление нового этапа (Supabase) ──
 window.addStageToFirestore = async function(stageName, workArt, workName) {
   const orderId = window._currentOrderId;
   if (!orderId) return null;
   const user = window.LabDesk.currentUser;
   try {
-    const ref = await addDoc(collection(db, 'stages'), {
+    const created = await window.sbAdapter.insert('stages', {
       order_id: orderId,
       lab_id: user.lab_id,
       name: stageName,
@@ -4796,9 +4748,8 @@ window.addStageToFirestore = async function(stageName, workArt, workName) {
       sort_order: window._ordStages.length,
       work_art: workArt || '',
       work_name: workName || '',
-      created_at: serverTimestamp(),
     });
-    return ref.id;
+    return created.id;
   } catch(e) {
     console.error('Add stage error:', e);
     return null;
@@ -4811,26 +4762,25 @@ window.changeOrderStatus = async function(newStatus) {
   const user = window.LabDesk.currentUser;
   try {
     var upd = { status: newStatus };
-    if(newStatus==='done') upd.completed_at = serverTimestamp();
-    await updateDoc(doc(db, 'orders', orderId), upd);
-    await addDoc(collection(db, 'order_history'), {
+    if(newStatus==='done') upd.completed_at = new Date().toISOString();
+    await window.sbAdapter.update('orders', orderId, upd);
+    await window.sbAdapter.insert('order_history', {
       order_id: orderId, user_id: user.uid,
       user_name: user.full_name || user.email || '',
       event_type: 'status_changed',
       status: newStatus,
       description: 'Статус изменён на: ' + newStatus,
-      created_at: serverTimestamp(),
     });
-    // Обновляем бейдж и кнопки сразу
+    // Обновляем локальный кэш и карточку сразу
     if (window._ordersCache[orderId]) {
       window._ordersCache[orderId].status = newStatus;
-      if(newStatus==='done') window._ordersCache[orderId].completed_at = {seconds: Date.now()/1000};
+      if(newStatus==='done') window._ordersCache[orderId].completed_at = new Date().toISOString();
       openOrderDetail(orderId);
     }
     window.showToast('Статус обновлён');
   } catch(e) {
     console.error('Update status error:', e);
-    window.showToast('Ошибка: ' + e.message);
+    window.showToast('Ошибка: ' + (e.message||e));
   }
 };
 
