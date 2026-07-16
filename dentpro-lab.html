@@ -3071,20 +3071,19 @@ window.saveTech = async function(){
   };
   try {
     if (editId) {
-      data.updated_at = serverTimestamp();
-      await updateDoc(doc(db, 'technicians', editId), data);
+      data.updated_at = new Date().toISOString();
+      await window.sbAdapter.update('technicians', editId, data);
       document.getElementById('mo-tech').classList.remove('op');
       if(window.showToast)window.showToast('✅ Сотрудник обновлён');
     } else {
       data.lab_id = user.lab_id;
       data.is_active = true;
-      data.created_at = serverTimestamp();
-      await addDoc(collection(db, 'technicians'), data);
+      await window.sbAdapter.insert('technicians', data);
       document.getElementById('mo-tech').classList.remove('op');
       if(window.showToast)window.showToast('✅ Сотрудник добавлен');
     }
     window._editingTechId = null;
-  } catch(e) { if(window.showToast)window.showToast('Ошибка: '+e.message); }
+  } catch(e) { if(window.showToast)window.showToast('Ошибка: '+(e.message||e)); }
   btn.disabled = false;
 };
 
@@ -3143,18 +3142,16 @@ window.renderTechnicians = function(techs){
 
 window.toggleTechActive = async function(techId, makeActive){
   try {
-    await updateDoc(doc(db, 'technicians', techId), { is_active: makeActive });
+    await window.sbAdapter.update('technicians', techId, { is_active: makeActive });
     window.showToast(makeActive?'Сотрудник возвращён':'Сотрудник уволен');
-  } catch(e) { window.showToast('Ошибка: '+e.message); }
+  } catch(e) { window.showToast('Ошибка: '+(e.message||e)); }
 };
 
 window.subscribeTechnicians = function(labId){
-  const q = query(collection(db,'technicians'), where('lab_id','==',labId));
-  onSnapshot(q, s => {
-    const techs = s.docs.map(d=>({id:d.id,...d.data()}));
-    techs.sort((a,b)=>(a.full_name||'').localeCompare(b.full_name||''));
+  window.sbAdapter.subscribe('technicians','lab_id',labId, rows => {
+    const techs = rows.slice().sort((a,b)=>(a.full_name||'').localeCompare(b.full_name||''));
     window.renderTechnicians(techs);
-  }, err => console.error('Staff error:', err));
+  });
 };
 
 // ── Прайс услуг ──
@@ -5199,6 +5196,7 @@ window.goToOrdersFiltered = function(filter){
     // ⏳ Подписки на данные подключаем по мере перевода доменов на Supabase.
     if (window.subscribePriceList) window.subscribePriceList(prof.lab_id);   // Прайс — переведён
     if (window.subscribeClinics)   window.subscribeClinics(prof.lab_id);     // Клиники — переведён
+    if (window.subscribeTechnicians) window.subscribeTechnicians(prof.lab_id); // Сотрудники — переведён
 
   } catch(e) { console.error('Boot error:', e); }
 })();
