@@ -3879,12 +3879,11 @@ window.saveLabOrder = async function(){
     // Если выбран новый врач и галка "сохранить" — создаём врача в базе
     let doctorId = (doctorSelVal && doctorSelVal!=='__new__') ? doctorSelVal : null;
     if(doctorSelVal === '__new__' && document.getElementById('lo-save-doctor').checked){
-      const docRef = await addDoc(collection(db,'doctors'),{
-        clinic_id: clinicId, full_name: doctor,
-        phone: doctorPhone, email: doctorEmail,
-        is_active: true, created_at: serverTimestamp(),
+      const newDoc = await window.sbAdapter.insert('doctors',{
+        clinic_id: clinicId, lab_id: user.lab_id, full_name: doctor,
+        phone: doctorPhone, email: doctorEmail, is_active: true,
       });
-      doctorId = docRef.id;
+      doctorId = newDoc.id;
     }
 
     // ── РЕЖИМ РЕДАКТИРОВАНИЯ: обновляем существующий заказ ──
@@ -3893,7 +3892,7 @@ window.saveLabOrder = async function(){
       const mainWorkE = works[0] || {};
       const totalQtyE = works.reduce((s,w)=>s+(w.qty||1),0);
       const teethE = (typeof window.getLabTeethData==='function') ? window.getLabTeethData() : [];
-      await updateDoc(doc(db,'orders', oid), {
+      await window.sbAdapter.update('orders', oid, {
         clinic_id: clinicId,
         doctor_id: doctorId,
         doctor_name: doctor,
@@ -3911,14 +3910,13 @@ window.saveLabOrder = async function(){
         due_date: document.getElementById('lo-due').value || null,
         due_time: document.getElementById('lo-due-time').value || null,
         teeth: teethE,
-        updated_at: serverTimestamp(),
+        updated_at: new Date().toISOString(),
       });
-      await addDoc(collection(db,'order_history'),{
+      await window.sbAdapter.insert('order_history',{
         order_id: oid, user_id: user.uid,
         user_name: user.full_name || user.email || '',
         event_type: 'order_updated',
         description: 'Заказ изменён',
-        created_at: serverTimestamp(),
       });
       window.showToast('✅ Заказ обновлён');
       document.getElementById('mo-ord').classList.remove('op');
@@ -3932,21 +3930,15 @@ window.saveLabOrder = async function(){
       return;
     }
 
-    // Номер заказа через транзакцию счётчика
-    const labRef = doc(db, 'labs', user.lab_id);
-    let orderNumber = '';
-    await runTransaction(db, async (tx)=>{
-      const labSnap = await tx.get(labRef);
-      const counter = (labSnap.exists()?(labSnap.data().order_counter||1000):1000)+1;
-      tx.update(labRef,{order_counter:counter});
-      orderNumber = 'ЛБ-'+String(counter).padStart(5,'0');
-    });
+    // Номер заказа — атомарно на сервере (RPC)
+    const { data: orderNumber, error: onErr } = await sb.rpc('next_order_number', { p_lab_id: user.lab_id });
+    if (onErr) throw onErr;
 
     const mainWork = works[0] || {};
     const totalQty = works.reduce((s,w)=>s+(w.qty||1),0);
     const teeth = (typeof window.getLabTeethData==='function') ? window.getLabTeethData() : [];
 
-    const orderRef = await addDoc(collection(db,'orders'),{
+    const order = await window.sbAdapter.insert('orders',{
       lab_id: user.lab_id,
       clinic_id: clinicId,
       doctor_id: doctorId,
@@ -3969,19 +3961,19 @@ window.saveLabOrder = async function(){
       teeth: teeth,
       created_by: user.uid,
       created_source: 'lab',
-      created_at: serverTimestamp(),
     });
+    const orderId = order.id;
 
-    await addDoc(collection(db,'order_history'),{
-      order_id: orderRef.id, user_id: user.uid,
+    await window.sbAdapter.insert('order_history',{
+      order_id: orderId, user_id: user.uid,
       user_name: user.full_name || user.email || '',
       event_type: 'order_created',
       description: 'Заказ '+orderNumber+' создан лабораторией',
-      created_at: serverTimestamp(),
     });
 
     // Автоматически создаём этапы производства — для КАЖДОЙ позиции из шаблона её категории
     try {
+      var stageRows = [];
       var soCounter = 0;
       for(var wi=0; wi<works.length; wi++){
         var wobj = works[wi];
@@ -3994,9 +3986,9 @@ window.saveLabOrder = async function(){
         if(window._tplCache && window._tplCache[cat] && window._tplCache[cat].stages && window._tplCache[cat].stages.length){
           tplStages = window._tplCache[cat].stages;
         } else {
-          var tq = query(collection(db,'stage_templates'), where('lab_id','==',user.lab_id), where('category','==',cat));
-          var tsnap = await getDocs(tq);
-          if(!tsnap.empty){ tplStages = tsnap.docs[0].data().stages||[]; }
+          const { data: tpl } = await sb.from('stage_templates').select('stages')
+            .eq('lab_id', user.lab_id).eq('category', cat).limit(1);
+          if(tpl && tpl.length){ tplStages = tpl[0].stages || []; }
         }
         // Если сохранённого шаблона нет — берём дефолтные этапы (как на экране «Шаблоны»)
         if((!tplStages || !tplStages.length) && typeof window.defaultStagesForCategory==='function'){
@@ -4010,22 +4002,18 @@ window.saveLabOrder = async function(){
             var st = tplStages[si];
             var stName = (typeof st==='string') ? st : st.name;
             var stDays = (typeof st==='string') ? 1 : (st.days||1);
-            await addDoc(collection(db,'stages'),{
-              order_id: orderRef.id,
-              lab_id: user.lab_id,
-              name: stName,
-              status: 'idle',
-              technician_name: '',
-              days_planned: stDays,
-              comment: '',
-              due_date: null,
-              sort_order: soCounter++,
-              work_art: wart,
-              work_name: wname,
-              created_at: serverTimestamp(),
+            stageRows.push({
+              order_id: orderId, lab_id: user.lab_id,
+              name: stName, status: 'idle', technician_name: '',
+              days_planned: stDays, comment: '', due_date: null,
+              sort_order: soCounter++, work_art: wart, work_name: wname,
             });
           }
         }
+      }
+      if(stageRows.length){
+        const { error: stErr } = await sb.from('stages').insert(stageRows);
+        if(stErr) throw stErr;
       }
     } catch(stageErr){ console.warn('Auto stages from template failed:', stageErr); }
 
@@ -4037,6 +4025,26 @@ window.saveLabOrder = async function(){
   }
   btn.disabled = false;
   btn.innerHTML = '<svg viewBox="0 0 24 24" style="width:14px;height:14px;stroke:#fff;fill:none;stroke-width:2"><polyline points="20 6 9 17 4 12"/></svg> Создать заказ';
+};
+
+// ── Подписка на заказы (Supabase) ──
+window.subscribeOrders = function(labId){
+  const load = async () => {
+    const { data, error } = await sb.from('orders')
+      .select('*, clinics(name)')
+      .eq('lab_id', labId)
+      .order('created_at', { ascending: false });
+    if (error) { console.error('orders load', error); return; }
+    const orders = (data||[]).map(o => ({ ...o, clinic_name: (o.clinics && o.clinics.name) || '—' }));
+    window._ordersCache = orders;
+    if (window.renderOrders)   window.renderOrders(orders);
+    if (window.renderDashboard) window.renderDashboard(orders);
+  };
+  load();
+  const ch = sb.channel('rt-orders-'+Math.random().toString(36).slice(2))
+    .on('postgres_changes', { event:'*', schema:'public', table:'orders' }, load)
+    .subscribe();
+  return ch;
 };
 
 // ── Врачи в форме заказа ──
@@ -5197,6 +5205,7 @@ window.goToOrdersFiltered = function(filter){
     if (window.subscribePriceList) window.subscribePriceList(prof.lab_id);   // Прайс — переведён
     if (window.subscribeClinics)   window.subscribeClinics(prof.lab_id);     // Клиники — переведён
     if (window.subscribeTechnicians) window.subscribeTechnicians(prof.lab_id); // Сотрудники — переведён
+    if (window.subscribeOrders)    window.subscribeOrders(prof.lab_id);      // Заказы — переведён
 
   } catch(e) { console.error('Boot error:', e); }
 })();
