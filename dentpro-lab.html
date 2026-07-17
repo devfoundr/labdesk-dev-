@@ -2361,14 +2361,12 @@ window.loadTplCategories = async function(){
   if(!user || !user.lab_id){ box.innerHTML='<div style="font-size:12px;color:var(--t3);text-align:center;padding:16px">Нет данных пользователя</div>'; return; }
   box.innerHTML = '<div style="font-size:12px;color:var(--t3);text-align:center;padding:16px">Загрузка...</div>';
   try {
-    const { collection, query, where, getDocs } = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js');
-    var pq = query(collection(window.db,'work_types'), where('lab_id','==',user.lab_id));
-    var psnap = await getDocs(pq);
+    var works = await window.sbAdapter.list('work_types', { eq:{lab_id:user.lab_id} });
     var catSet = {};
     var catMinArt = {};
-    psnap.docs.forEach(function(d){
-      var c = d.data().category || 'Без категории';
-      var a = d.data().article || '\uffff';
+    works.forEach(function(d){
+      var c = d.category || 'Без категории';
+      var a = d.article || '\uffff';
       catSet[c] = true;
       if(catMinArt[c] === undefined || a < catMinArt[c]) catMinArt[c] = a;
     });
@@ -2379,9 +2377,8 @@ window.loadTplCategories = async function(){
 
     window._tplCache = {};
     try {
-      var tq = query(collection(window.db,'stage_templates'), where('lab_id','==',user.lab_id));
-      var tsnap = await getDocs(tq);
-      tsnap.docs.forEach(function(d){ var data=d.data(); window._tplCache[data.category]={id:d.id, stages:data.stages||[]}; });
+      var tpls = await window.sbAdapter.list('stage_templates', { eq:{lab_id:user.lab_id} });
+      tpls.forEach(function(d){ window._tplCache[d.category]={id:d.id, stages:d.stages||[]}; });
     } catch(tplErr){ console.warn('stage_templates read failed:', tplErr); }
 
     if(window._tplCategories.length===0){
@@ -2463,21 +2460,20 @@ window.saveTplToFirestore = async function(){
     if(nm) stages.push({name:nm, days:days});
   });
   try {
-    const { collection, doc, addDoc, updateDoc, serverTimestamp } = await import('https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js');
     var cached = window._tplCache[_curTpl];
     if(cached && cached.id){
-      await updateDoc(doc(window.db,'stage_templates',cached.id), { stages: stages, updated_at: serverTimestamp() });
+      await window.sbAdapter.update('stage_templates', cached.id, { stages: stages });
       window._tplCache[_curTpl].stages = stages;
     } else {
-      var ref = await addDoc(collection(window.db,'stage_templates'), {
-        lab_id: user.lab_id, category: _curTpl, stages: stages, created_at: serverTimestamp(),
+      var created = await window.sbAdapter.insert('stage_templates', {
+        lab_id: user.lab_id, category: _curTpl, stages: stages,
       });
-      window._tplCache[_curTpl] = { id: ref.id, stages: stages };
+      window._tplCache[_curTpl] = { id: created.id, stages: stages };
     }
     showToast('✓ Шаблон сохранён');
   } catch(e){
     console.error('Save template error:', e);
-    showToast('Ошибка сохранения: ' + e.message);
+    showToast('Ошибка сохранения: ' + (e.message||e));
   }
 };
 function addWorkType(){
