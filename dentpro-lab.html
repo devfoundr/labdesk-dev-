@@ -4196,7 +4196,7 @@ window.loadActOrders = function(){
   var orders = all.filter(function(o){
     if(o.clinic_id!==clinicId) return false;
     if(o.status!=='done') return false;
-    var cd = o.completed_at ? new Date((o.completed_at.seconds||0)*1000) : (o.due_date?new Date(o.due_date):null);
+    var cd = o.completed_at ? new Date(o.completed_at) : (o.due_date?new Date(o.due_date):null);
     if(from && cd && cd < from) return false;
     if(to && cd && cd > to) return false;
     return true;
@@ -4334,7 +4334,7 @@ function renderActsList(acts){
   var statusLabels={created:'as-sent',sent:'as-sent',paid:'as-paid'};
   var statusText={created:'Сформирован',sent:'Отправлен',paid:'Оплачен'};
   box.innerHTML = acts.map(function(a){
-    var d = a.created_at&&a.created_at.seconds ? new Date(a.created_at.seconds*1000).toLocaleDateString('ru-RU') : '';
+    var d = a.created_at ? new Date(a.created_at).toLocaleDateString('ru-RU') : '';
     var cls = statusLabels[a.status]||'as-sent';
     return '<div class="act-row-item" style="cursor:pointer" onclick="openActMenu(\''+a.id+'\')">'
       +'<div><div style="font-weight:600">'+a.act_number+'</div><div style="font-size:11px;color:var(--t3)">'+(a.clinic_name||'')+' · '+(a.orders?a.orders.length:0)+' зак.</div></div>'
