@@ -4369,16 +4369,29 @@ window.printActData = function(a){
   var r = lab.requisites || {};
   var labName = r.name || lab.name || 'Зуботехническая лаборатория';
   var periodStr = (a.period_from||'')+' — '+(a.period_to||'');
-  var rows = (a.orders||[]).map(function(o,i){
-    var worksList = (o.works&&o.works.length) ? o.works.map(function(w){return w.name+(w.qty>1?' ×'+w.qty:'');}).join('; ') : o.work_type;
-    return '<tr>'
-      +'<td style="padding:7px 9px;border:1px solid #ddd;text-align:center">'+(i+1)+'</td>'
-      +'<td style="padding:7px 9px;border:1px solid #ddd">'+(o.patient_name||'—')+(o.doctor_name?'<br><span style="font-size:11px;color:#888">врач: '+o.doctor_name+'</span>':'')+'</td>'
-      +'<td style="padding:7px 9px;border:1px solid #ddd">'+worksList+'</td>'
-      +'<td style="padding:7px 9px;border:1px solid #ddd;text-align:center">'+(o.completed_at||'—')+'</td>'
-      +'<td style="padding:7px 9px;border:1px solid #ddd;text-align:right;font-weight:600">'+(o.total||0).toLocaleString('ru')+' ₽</td>'
-      +'</tr>';
-  }).join('');
+  var rows = '';
+  var idx = 0;
+  (a.orders||[]).forEach(function(o){
+    var works = (o.works && o.works.length) ? o.works
+                : [{ name:(o.work_type||'—'), qty:(o.quantity||1), price:0, article:'' }];
+    works.forEach(function(w, wi){
+      idx++;
+      var lineSum = (Number(w.price)||0) * (Number(w.qty)||1);
+      var art = w.article ? '<span style="color:#888;font-size:11px">'+w.article+'</span> ' : '';
+      var qty = (Number(w.qty)>1) ? ' <span style="color:#888">×'+w.qty+'</span>' : '';
+      var patientCell = (wi===0)
+        ? (o.patient_name||'—')+(o.doctor_name?'<br><span style="font-size:11px;color:#888">врач: '+o.doctor_name+'</span>':'')
+        : '';
+      var dateCell = (wi===0) ? (o.completed_at||'—') : '';
+      rows += '<tr>'
+        +'<td style="padding:7px 9px;border:1px solid #ddd;text-align:center">'+idx+'</td>'
+        +'<td style="padding:7px 9px;border:1px solid #ddd">'+patientCell+'</td>'
+        +'<td style="padding:7px 9px;border:1px solid #ddd">'+art+(w.name||'—')+qty+'</td>'
+        +'<td style="padding:7px 9px;border:1px solid #ddd;text-align:center">'+dateCell+'</td>'
+        +'<td style="padding:7px 9px;border:1px solid #ddd;text-align:right;font-weight:600">'+lineSum.toLocaleString('ru')+' ₽</td>'
+        +'</tr>';
+    });
+  });
   var html='<!DOCTYPE html><html><head><meta charset="utf-8"><title>'+a.act_number+'</title>'
     +'<style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:Arial,sans-serif;font-size:13px;color:#111;padding:24px 28px}'
     +'h1{font-size:20px;margin-bottom:4px}.sub{color:#888;font-size:12px;margin-bottom:18px}'
@@ -4409,14 +4422,23 @@ window.printInvoiceData = function(a){
   var lab = window.LabDesk.labData || {};
   var r = lab.requisites || {};
   var labName = r.name || lab.name || 'Зуботехническая лаборатория';
-  var rows = (a.orders||[]).map(function(o,i){
-    var worksList = (o.works&&o.works.length) ? o.works.map(function(w){return w.name+(w.qty>1?' ×'+w.qty:'');}).join('; ') : o.work_type;
-    return '<tr>'
-      +'<td style="padding:7px 9px;border:1px solid #ddd;text-align:center">'+(i+1)+'</td>'
-      +'<td style="padding:7px 9px;border:1px solid #ddd">'+worksList+' ('+(o.patient_name||'')+')</td>'
-      +'<td style="padding:7px 9px;border:1px solid #ddd;text-align:right;font-weight:600">'+(o.total||0).toLocaleString('ru')+' ₽</td>'
-      +'</tr>';
-  }).join('');
+  var rows = '';
+  var idx = 0;
+  (a.orders||[]).forEach(function(o){
+    var works = (o.works && o.works.length) ? o.works
+                : [{ name:(o.work_type||'—'), qty:(o.quantity||1), price:0, article:'' }];
+    works.forEach(function(w, wi){
+      idx++;
+      var lineSum = (Number(w.price)||0) * (Number(w.qty)||1);
+      var qty = (Number(w.qty)>1) ? ' ×'+w.qty : '';
+      var pat = (wi===0 && o.patient_name) ? ' <span style="color:#888;font-size:11px">('+o.patient_name+')</span>' : '';
+      rows += '<tr>'
+        +'<td style="padding:7px 9px;border:1px solid #ddd;text-align:center">'+idx+'</td>'
+        +'<td style="padding:7px 9px;border:1px solid #ddd">'+(w.name||'—')+qty+pat+'</td>'
+        +'<td style="padding:7px 9px;border:1px solid #ddd;text-align:right;font-weight:600">'+lineSum.toLocaleString('ru')+' ₽</td>'
+        +'</tr>';
+    });
+  });
   var invNumber = a.act_number ? a.act_number.replace('АКТ','СЧЁТ') : 'СЧЁТ';
   // Блок реквизитов поставщика
   var reqLines = [];
