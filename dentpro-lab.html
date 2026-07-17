@@ -3790,20 +3790,20 @@ window.saveStageBank = async function(){
   const btn=document.getElementById('btn-save-bank');
   btn.disabled=true;
   try{
-    await addDoc(collection(db,'stage_bank'),{
+    await window.sbAdapter.insert('stage_bank',{
       lab_id:user.lab_id, name,
       days_default:parseInt(document.getElementById('bank-days').value)||1,
-      is_active:true, created_at:serverTimestamp(),
+      is_active:true,
     });
     document.getElementById('mo-bank').classList.remove('op');
     window.showToast('✅ Этап добавлен в банк');
-  }catch(e){window.showToast('Ошибка: '+e.message);}
+  }catch(e){window.showToast('Ошибка: '+(e.message||e));}
   btn.disabled=false;
 };
 window.deleteStageBank = async function(id){
   if(!confirm('Удалить операцию из банка?'))return;
-  try{await deleteDoc(doc(db,'stage_bank',id));window.showToast('Удалено');}
-  catch(e){window.showToast('Ошибка: '+e.message);}
+  try{await window.sbAdapter.remove('stage_bank',id);window.showToast('Удалено');}
+  catch(e){window.showToast('Ошибка: '+(e.message||e));}
 };
 window.renderStageBank = function(items){
   const box = document.getElementById('stages-bank-list');
@@ -3819,12 +3819,10 @@ window.renderStageBank = function(items){
   ).join('');
 };
 window.subscribeStageBank = function(labId){
-  const q = query(collection(db,'stage_bank'), where('lab_id','==',labId));
-  onSnapshot(q, s=>{
-    const items = s.docs.map(d=>({id:d.id,...d.data()})).filter(i=>i.is_active!==false);
-    items.sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+  window.sbAdapter.subscribe('stage_bank','lab_id',labId, rows=>{
+    const items = rows.filter(i=>i.is_active!==false).sort((a,b)=>(a.name||'').localeCompare(b.name||''));
     window.renderStageBank(items);
-  }, err=>console.error('Bank error:',err));
+  });
 };
 
 // ── Права меню по ролям ──
@@ -4148,13 +4146,13 @@ window.saveLabRequisites = async function(){
     bank:g('st-bank'), bik:g('st-bik'), corr:g('st-corr'), director:g('st-director'),
   };
   try {
-    await updateDoc(doc(db,'labs',user.lab_id), { requisites: req });
+    await window.sbAdapter.update('labs', user.lab_id, { requisites: req });
     if(!window.LabDesk.labData) window.LabDesk.labData={};
     window.LabDesk.labData.requisites = req;
     window.showToast('✅ Реквизиты сохранены');
   } catch(e){
     console.error('Save requisites error:', e);
-    window.showToast('Ошибка: '+e.message);
+    window.showToast('Ошибка: '+(e.message||e));
   }
 };
 
@@ -4273,14 +4271,8 @@ window.createAct = async function(){
   // Реквизиты клиники — из кэша (без лишнего запроса к серверу)
   var clinicReq = (clinic && clinic.requisites) ? clinic.requisites : {};
   try {
-    var labRef = doc(db,'labs',user.lab_id);
-    var actNumber='';
-    await runTransaction(db, async (tx)=>{
-      var snap = await tx.get(labRef);
-      var c = (snap.exists()?(snap.data().act_counter||0):0)+1;
-      tx.update(labRef,{act_counter:c});
-      actNumber = 'АКТ-'+String(c).padStart(4,'0');
-    });
+    const { data: actNumber, error: anErr } = await sb.rpc('next_act_number', { p_lab_id: user.lab_id });
+    if (anErr) throw anErr;
     var actData = {
       lab_id: user.lab_id, clinic_id: clinicId, clinic_name: clinic?clinic.name:'',
       clinic_requisites: clinicReq,
@@ -4291,41 +4283,36 @@ window.createAct = async function(){
         order_id:o.id, order_number:o.order_number, patient_name:o.patient_name,
         doctor_name:o.doctor_name||'', work_type:o.work_type,
         works:o.works||[], total:orderTotal(o),
-        completed_at: o.completed_at ? (o.completed_at.seconds? new Date(o.completed_at.seconds*1000).toISOString().slice(0,10) : null) : (o.due_date||null),
+        completed_at: o.completed_at ? String(o.completed_at).slice(0,10) : (o.due_date||null),
       };}),
       total: total, status:'created',
-      created_by: user.uid, created_at: serverTimestamp(),
+      created_by: user.uid,
     };
-    var ref = await addDoc(collection(db,'acts'), actData);
+    var created = await window.sbAdapter.insert('acts', actData);
     window.showToast('✅ '+actNumber+' сформирован — откройте его в списке для печати');
-    window._lastActData = {...actData, id:ref.id};
+    window._lastActData = {...actData, id:created.id};
     // Сбрасываем выбор, чтобы не создать дубль
     window._actSelectedIds = {};
     document.getElementById('act-total-block').style.display='none';
   } catch(e){
     console.error('Create act error:', e);
-    window.showToast('Ошибка: '+e.message);
+    window.showToast('Ошибка: '+(e.message||e));
   }
 };
 
 window.subscribeActs = function(){
   var user = window.LabDesk.currentUser;
   if(!user) return;
-  var q = query(collection(db,'acts'), where('lab_id','==',user.lab_id));
-  onSnapshot(q, function(s){
-    var acts = s.docs.map(function(d){
-      var data = d.data();
-      // Если timestamp ещё не подтверждён сервером — считаем акт самым свежим
-      var pending = d.metadata.hasPendingWrites;
-      var ts = (data.created_at && data.created_at.seconds) ? data.created_at.seconds
-               : (pending ? Number.MAX_SAFE_INTEGER : 0);
-      return {id:d.id, _ts:ts, ...data};
+  window.sbAdapter.subscribe('acts','lab_id',user.lab_id, function(rows){
+    var acts = rows.slice().sort(function(a,b){
+      var ta = a.created_at ? new Date(a.created_at).getTime() : 0;
+      var tb = b.created_at ? new Date(b.created_at).getTime() : 0;
+      return tb - ta;
     });
-    acts.sort(function(a,b){ return b._ts - a._ts; });
     window._actsCache = {};
     acts.forEach(function(a){ window._actsCache[a.id]=a; });
     renderActsList(acts);
-  }, function(err){ console.error('Acts error:', err); });
+  });
 };
 
 function renderActsList(acts){
@@ -4372,8 +4359,8 @@ window.actMenuAction = function(action){
   cM('mo-act-menu');
   if(action==='act'){ window.printActData(a); }
   else if(action==='invoice'){ window.printInvoiceData(a); }
-  else if(action==='paid'){ updateDoc(doc(db,'acts',actId),{status:'paid'}).then(function(){window.showToast('Акт отмечен оплаченным');}); }
-  else if(action==='delete'){ if(confirm('Удалить акт '+a.act_number+'?')) deleteDoc(doc(db,'acts',actId)).then(function(){window.showToast('Акт удалён');}); }
+  else if(action==='paid'){ window.sbAdapter.update('acts',actId,{status:'paid'}).then(function(){window.showToast('Акт отмечен оплаченным');}).catch(function(e){window.showToast('Ошибка: '+(e.message||e));}); }
+  else if(action==='delete'){ if(confirm('Удалить акт '+a.act_number+'?')) window.sbAdapter.remove('acts',actId).then(function(){window.showToast('Акт удалён');}).catch(function(e){window.showToast('Ошибка: '+(e.message||e));}); }
 };
 
 // Печать акта выполненных работ
@@ -5152,6 +5139,7 @@ window.goToOrdersFiltered = function(filter){
     if (window.subscribeClinics)   window.subscribeClinics(prof.lab_id);     // Клиники — переведён
     if (window.subscribeTechnicians) window.subscribeTechnicians(prof.lab_id); // Сотрудники — переведён
     if (window.subscribeOrders)    window.subscribeOrders(prof.lab_id);      // Заказы — переведён
+    if (window.subscribeStageBank) window.subscribeStageBank(prof.lab_id);   // Банк этапов — переведён
 
   } catch(e) { console.error('Boot error:', e); }
 })();
