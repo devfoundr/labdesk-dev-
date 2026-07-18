@@ -172,6 +172,11 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 let pendingEmail = '';   // email, ожидающий подтверждения (для «отправить повторно»)
 
 // ── Реакция на переход по ссылке восстановления пароля ──
+// Признак перехода по ссылке восстановления фиксируем СИНХРОННО, до любых await:
+// клиент Supabase обрабатывает ссылку и очищает адресную строку почти сразу,
+// поэтому более поздняя проверка уже ничего не находит.
+const IS_RECOVERY = /type=recovery/.test(location.hash) || /type=recovery/.test(location.search);
+
 supabase.auth.onAuthStateChange((event) => {
   if (event === 'PASSWORD_RECOVERY') {
     document.getElementById('tabs').style.display = 'none';
@@ -181,9 +186,14 @@ supabase.auth.onAuthStateChange((event) => {
 
 // ── Авто-редирект, если уже вошёл ──
 (async function boot(){
+  // Пришли по ссылке сброса пароля — показываем экран нового пароля, не пускаем в кабинет
+  if (IS_RECOVERY) {
+    const tabs = document.getElementById('tabs');
+    if (tabs) tabs.style.display = 'none';
+    showScreen('newpass');
+    return;
+  }
   const { data:{ session } } = await supabase.auth.getSession();
-  // если пришли по ссылке восстановления — не редиректим, покажем экран нового пароля
-  if (location.hash.includes('type=recovery')) return;
   if (session && session.user) { redirectByRole(session.user.id); }
 })();
 
